@@ -198,3 +198,28 @@ plot(edges > thr_edge)
 # use overlap of Otsu thresholds to get seed pixels
 seeds <- ifel(edges > thr_edge, 0.333, 0) + ifel(roughness_ms > thr_rough, 0.333, 0) + ifel(slope_dif < thr_slope, 0.333, 0)
 plot(seeds)
+
+## Converting seed layer to seed points ##
+
+# use a threshold to define seed pixels
+seed_candidates <- ifel(seeds > 0.9, 1, NA)
+
+###############################################################################
+# potentially resample to a coarser resolution to make fewer candidate points #
+empty_rast <- rast(ext = ext(seeds), crs = crs(seeds), res = 100) # eg. resolution = 100m
+seed_candidates <- resample(seeds, empty_rast)
+###############################################################################
+
+# convert the seed candidate pixels to points
+seed_pts <- as.points(seed_candidates, values = FALSE, na.rm = TRUE)
+
+####################################
+# for use with 'shiny' application #
+library(sf)
+
+# convert from spatvector object to sf object
+seed_sf <- st_as_sf(seeds_pts)
+
+# Reproject to WGS84 lon/lat for using a base map in the application
+seed_sf <- st_transform(seed_sf, crs = 4326)
+####################################
