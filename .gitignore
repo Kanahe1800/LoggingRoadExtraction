@@ -7,4 +7,9 @@
 .Rproj.user/
 .Ruserdata/
 *.Rproj
+*.tif.RData
+.Rhistory
+.Rproj.user/
+.Ruserdata/
+*.Rproj
 *.tif
