@@ -6,10 +6,10 @@ library(whitebox)
 library(autothresholdr)
 
 ## set up directories ##
-dir.in <- "E:/MSc/LiDAR/ChipmunkCreek/" # for inputs
-dir.out <- "E:/ResRoadsFix/out/" # for outputs
-dir.tmp <- "E:/ResRoadsFix/tmp/" # for temporary files
-
+dir.in <- "C:/Users/mimam/Dropbox/lider_data/input" # for input
+dir.out <- "C:/Users/mimam/Dropbox/lider_data/output" # for outputs
+dir.tmp <- "C:/Users/mimam/Dropbox/lider_data/tmp" # for temporary files
+file_name <- "pine_lake.tif"
 ## custom functions ##
 # activation function
 activation <- function(x, th, asc = TRUE) {
@@ -116,7 +116,7 @@ otsu_thresh <- function(r) {
 
 #### terrain variables ####
 ## call in the DEM ##
-dem <-  terra::rast(file.path(dir.in, "ChipmunkCreek_DEM_Clip.tif"))
+dem <-  terra::rast(file.path(dir.in, file_name))
 
 
 ## slope (difference) ##
@@ -158,7 +158,7 @@ gc()
 ## profile curvature ##
 # calculate profile curvature layer
 wbt_profile_curvature(
-  dem = file.path(dir.in, "ChipmunkCreek_DEM_Clip.tif"),
+  dem = file.path(dir.in, file_name),
   output = file.path(dir.out, "profcurv_cc.tif")
 )
 
@@ -196,7 +196,7 @@ thr_edge <- otsu_thresh(edges)
 plot(edges > thr_edge)
 
 # use overlap of Otsu thresholds to get seed pixels
-seeds <- ifel(edges > thr_edge, 0.333, 0) + ifel(roughness_ms > thr_rough, 0.333, 0) + ifel(slope_dif < thr_slope, 0.333, 0)
+seeds <-ifel(edges > thr_edge, 0.333, 0) + ifel(roughness_ms > thr_rough, 0.333, 0) + ifel(slope_dif < thr_slope, 0.333, 0)
 plot(seeds)
 
 ## Converting seed layer to seed points ##
