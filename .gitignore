@@ -13,3 +13,4 @@
 .Ruserdata/
 *.Rproj
 *.tif
+__Pycache__

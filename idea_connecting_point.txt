@@ -1,0 +1,27 @@
+Using seed_candidate, create road candidates points. 
+
+Using sunshine web app delte all points that are completely off.
+
+Download geojson that contains correct candidates
+
+Given a cleaned set of candidate road points (GeoJSON) and a DEM, the script:
+
+  loads and projects the points to a metric CRS (UTM),
+  
+  samples the elevation at each point from the DEM,
+  
+  builds a weighted neighbor graph using k-nearest neighbors, with an in-between terrain check along each candidate edge,
+    For each point, we consider its k nearest neighbors in the projected (meter) space.
+    For each candidate edge i–j, we walk along the straight line between the points and sample the DEM at intervals.
+    If any step between samples has grade > max_grade_edge (e.g., 29%), the edge is discarded (we don’t connect across steep obstacles/cut banks/ditches).
+    Otherwise we compute an edge weight:
+    base cost = Euclidean distance d (shorter is better)
+    plus alpha_dz * dz (discourages connecting points with a big end-to-end elevation difference)
+    Result: the graph favors short, elevation-consistent edges with no steep bits in between.
+
+  extracts a minimum spanning forest (keeps all branches, removes redundant cross-links),
+    For each connected component, we keep the MST, which preserves all necessary branches but removes redundant cross-links.
+    Across the whole graph this yields a forest (multiple trees) — perfect for road networks with many spurs.
+
+Possible problems
+  if there are tall trees between, that could be considered as big gradeient change

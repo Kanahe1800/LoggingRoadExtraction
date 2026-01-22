@@ -6,12 +6,19 @@ library(leaflet.extras)
 library(sf)
 
 # make some simple example points
-pts <- st_as_sf(data.frame(
-  id = 1:5,
-  lon = c(-123.1, -123.2, -123.3, -123.4, -123.5),
-  lat = c(49.3, 49.31, 49.32, 49.33, 49.34)
-), coords = c("lon", "lat"), crs = 4326)
+# pts <- st_as_sf(data.frame(
+#   id = 1:5,
+#   lon = c(-123.1, -123.2, -123.3, -123.4, -123.5),
+#   lat = c(49.3, 49.31, 49.32, 49.33, 49.34)
+# ), coords = c("lon", "lat"), crs = 4326)
 
+# stopifnot(all(c("lon","lat") %in% names(seed_df)))
+# pts <- st_as_sf(seed_df, coords = c("lon", "lat"), crs = 4326)
+pts <- st_sf(
+  id = integer(0),
+  geometry = st_sfc(crs = 4326)
+)
+rv  <- reactiveVal(pts)
 # create ui layout
 ui <- fluidPage(
   titlePanel("Editable Points App — Smooth Add/Delete with AOI"),
@@ -89,21 +96,70 @@ server <- function(input, output, session) {
   })
   
   # Add a new point by clicking on the map
+  # observeEvent(input$map_click, {
+  #   req(input$mode == "add")          # Only when in'Add' mode
+  #   req(!drawing_in_progress())       # Ignore clicks during AOI drawing
+  #   
+  #   click <- input$map_click          # Get click coordinates
+  #   new_id <- ifelse(nrow(rv()) == 0, 1, max(rv()$id, na.rm = TRUE) + 1)
+  #   
+  #   # Create new point as an sf object
+  #   new_point <- st_sf(
+  #     id = new_id,
+  #     geometry = st_sfc(st_point(c(click$lng, click$lat)), crs = 4326)
+  #   )
+  #   rv(rbind(rv(), new_point))        # Append to reactive dataset
+  #   
+  #   # Update map dynamically without full re-render
+  #   view <- map_view()
+  #   leafletProxy("map") %>%
+  #     addCircleMarkers(
+  #       data = new_point,
+  #       radius = 6,
+  #       color = "red",
+  #       layerId = as.character(new_id),
+  #       group = "points",
+  #       label = paste0("ID: ", new_id)
+  #     ) %>%
+  #     setView(lng = view$center$lng, lat = view$center$lat, zoom = view$zoom)
+  # })
   observeEvent(input$map_click, {
-    req(input$mode == "add")          # Only when in'Add' mode
-    req(!drawing_in_progress())       # Ignore clicks during AOI drawing
+    req(input$mode == "add")
+    req(!drawing_in_progress())
     
-    click <- input$map_click          # Get click coordinates
-    new_id <- ifelse(nrow(rv()) == 0, 1, max(rv()$id, na.rm = TRUE) + 1)
+    click <- input$map_click
+    current <- rv()                # sf
+    crs_cur <- st_crs(current)
     
-    # Create new point as an sf object
+    # next id
+    new_id <- if (nrow(current) == 0) 1 else max(current$id, na.rm = TRUE) + 1
+    
+    # minimal sf row
     new_point <- st_sf(
       id = new_id,
-      geometry = st_sfc(st_point(c(click$lng, click$lat)), crs = 4326)
+      geometry = st_sfc(st_point(c(click$lng, click$lat)), crs = crs_cur)
     )
-    rv(rbind(rv(), new_point))        # Append to reactive dataset
     
-    # Update map dynamically without full re-render
+    # ---- harmonize columns with current ----
+    # add any columns that exist in current but not in new_point
+    missing_cols <- setdiff(names(current), names(new_point))
+    for (nm in missing_cols) {
+      new_point[[nm]] <- NA
+    }
+    
+    # drop any columns that exist in new_point but not in current (except geometry is in both)
+    extra_cols <- setdiff(names(new_point), names(current))
+    if (length(extra_cols)) {
+      new_point <- new_point[, setdiff(names(new_point), extra_cols), drop = FALSE]
+    }
+    
+    # reorder columns to match current
+    new_point <- new_point[, names(current), drop = FALSE]
+    
+    # now they match → safe to rbind
+    rv(rbind(current, new_point))
+    
+    # map update
     view <- map_view()
     leafletProxy("map") %>%
       addCircleMarkers(
@@ -116,6 +172,7 @@ server <- function(input, output, session) {
       ) %>%
       setView(lng = view$center$lng, lat = view$center$lat, zoom = view$zoom)
   })
+  
   
   # Delete a single point by clicking its marker
   observeEvent(input$map_marker_click, {
