@@ -152,15 +152,12 @@ seeds_to_points <- function(
 }
 
 
-out_points <- "C:/Users/mimam/Dropbox/lider_data/output/seed_points_monotonic_test.geojson"
+out_points <- "C:/Users/mimam/Dropbox/lider_data/output/seed_points_test_v2.geojson"
 
 pts <- seeds_to_points(
   seeds = seeds,
   out_points = out_points,
-  prob_threshold = 0.25,         # tune this
-  do_opening = FALSE,            # keep FALSE initially; can break thin roads
-  opening_size = 3
-  # min_skel_blob_px = 1,
-  # min_component_len_m = 1.0,
-  # min_spacing_m = 8.0
+  prob_threshold = 0.4,
+  min_spacing_m = 10.0,           # Adjust this to control point density
+  min_component_len_m = 2.0
 )

@@ -8,12 +8,17 @@ library(raster)
 # -------------------------
 # User settings (edit here)
 # -------------------------
-dir.in  <- "E:/ResRoadsFix/in"
-dir.out <- "E:/ResRoadsFix/out"
-dir.tmp <- "E:/ResRoadsFix/tmp"
+# dir.in  <- "E:/ResRoadsFix/in"
+# dir.out <- "E:/ResRoadsFix/out"
+# dir.tmp <- "E:/ResRoadsFix/tmp"
+## set up directories ##
+dir.in <- "C:/Users/mimam/Dropbox/lider_data/input" # for input
+dir.out <- "C:/Users/mimam/Dropbox/lider_data/output" # for outputs
+dir.tmp <- "C:/Users/mimam/Dropbox/lider_data/tmp" # for temporary files
+file_name <- "pine_lake.tif"
 
-dem_file <- file.path(dir.in, "Robson1.tif")
-road_lines <- file.path(dir.in, "")
+dem_file <- file.path(dir.in, file_name)
+road_lines <- file.path(dir.in, "road")
 
 # path to your anisotropic C++ source (do NOT change working directory)
 anisotropic_cpp <- "C:/Users/sebas/OneDrive/Desktop/Grad school/Scripts/anisotropic_diffusion_2.cpp"
@@ -84,7 +89,7 @@ activation_raster <- function(r, th, asc = TRUE, filename = "") {
 ensure_dir(dir.out)
 ensure_dir(dir.tmp)
 check_file(dem_file)
-check_file(points_shp)
+# check_file(points_shp)
 
 if (!file.exists(anisotropic_cpp)) {
   warning("anisotropic C++ file not found at: ", anisotropic_cpp,
