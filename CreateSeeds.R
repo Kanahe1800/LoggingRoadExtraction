@@ -6,10 +6,10 @@ library(whitebox)
 library(autothresholdr)
 
 ## set up directories ##
-dir.in <- "C:/Users/mimam/Dropbox/lider_data/input" # for input
-dir.out <- "C:/Users/mimam/Dropbox/lider_data/output" # for outputs
-dir.tmp <- "C:/Users/mimam/Dropbox/lider_data/tmp" # for temporary files
-file_name <- "pine_lake.tif"
+dir.in <- "E:/MSc/LiDAR/ChipmunkCreek/" # for inputs
+dir.out <- "E:/ResRoadsFix/out/" # for outputs
+dir.tmp <- "E:/ResRoadsFix/tmp/" # for temporary files
+
 ## custom functions ##
 # activation function
 activation <- function(x, th, asc = TRUE) {
@@ -116,7 +116,7 @@ otsu_thresh <- function(r) {
 
 #### terrain variables ####
 ## call in the DEM ##
-dem <-  terra::rast(file.path(dir.in, file_name))
+dem <-  terra::rast(file.path(dir.in, "ChipmunkCreek_DEM_Clip.tif"))
 
 
 ## slope (difference) ##
@@ -158,7 +158,7 @@ gc()
 ## profile curvature ##
 # calculate profile curvature layer
 wbt_profile_curvature(
-  dem = file.path(dir.in, file_name),
+  dem = file.path(dir.in, "ChipmunkCreek_DEM_Clip.tif"),
   output = file.path(dir.out, "profcurv_cc.tif")
 )
 
@@ -196,60 +196,30 @@ thr_edge <- otsu_thresh(edges)
 plot(edges > thr_edge)
 
 # use overlap of Otsu thresholds to get seed pixels
-# seeds <-ifel(edges > thr_edge, 0.333, 0) + ifel(roughness_ms > thr_rough, 0.333, 0) + ifel(slope_dif < thr_slope, 0.333, 0)
-# plot(seeds)
-
-# Normalize each layer to a 0–1 range around its threshold
-edges_score <- (edges - thr_edge)
-edges_score[edges_score < 0] <- 0
-edges_score <- edges_score / max(edges_score[], na.rm = TRUE)
-
-rough_score <- (roughness_ms - thr_rough)
-rough_score[rough_score < 0] <- 0
-rough_score <- rough_score / max(rough_score[], na.rm = TRUE)
-
-slope_score <- (thr_slope - slope_dif)
-slope_score[slope_score < 0] <- 0
-slope_score <- slope_score / max(slope_score[], na.rm = TRUE)
-
-# Combine into continuous 0–1 score, scaled to roughly same total range
-seeds <- (edges_score + rough_score + slope_score) / 3
-plot(seeds, main = "Continuous seed strength (0–1)")
+seeds <- ifel(edges > thr_edge, 0.333, 0) + ifel(roughness_ms > thr_rough, 0.333, 0) + ifel(slope_dif < thr_slope, 0.333, 0)
+plot(seeds)
 
 ## Converting seed layer to seed points ##
 
 # use a threshold to define seed pixels
-# seed_candidates <- ifel(seeds > 0.9, 1, NA)
-# 
-# ###############################################################################
-# # potentially resample to a coarser resolution to make fewer candidate points #
-# empty_rast <- rast(ext = ext(seeds), crs = crs(seeds), res = 20) # eg. resolution = 100m
-# seed_candidates <- resample(seed_candidates, empty_rast)
-# ###############################################################################
-# 
-# seed_candidates <- ifel(seed_candidates == 1, 1, NA)
-# # convert the seed candidate pixels to points
-# seed_pts <- as.points(seed_candidates, values = TRUE, na.rm = TRUE)
-# 
-# ####################################
-# # for use with 'shiny' application #
-# library(sf)
-# 
-# # convert from spatvector object to sf object
-# seed_sf <- st_as_sf(seed_pts)
-# 
-# nm <- setdiff(names(seed_sf), attr(seed_sf, "sf_column") %||% "geometry")
-# if (length(nm) == 1) names(seed_sf)[names(seed_sf) == nm] <- "value"
-# 
-# # Reproject to WGS84 lon/lat for using a base map in the application
-# seed_sf <- st_transform(seed_sf, crs = 4326)
-# ####################################
-# 
-# plot(seed_sf["value"])
-# coords <- st_coordinates(seed_sf)
-# seed_df <- cbind(st_drop_geometry(seed_sf), 
-#                  lon = coords[, "X"], 
-#                  lat = coords[, "Y"])
-# seed_df$id <- 1:nrow(seed_df)
-# 
-seed_df <- as.data.frame(seed_df)
+seed_candidates <- ifel(seeds > 0.9, 1, NA)
+
+###############################################################################
+# potentially resample to a coarser resolution to make fewer candidate points #
+empty_rast <- rast(ext = ext(seeds), crs = crs(seeds), res = 100) # eg. resolution = 100m
+seed_candidates <- resample(seeds, empty_rast)
+###############################################################################
+
+# convert the seed candidate pixels to points
+seed_pts <- as.points(seed_candidates, values = FALSE, na.rm = TRUE)
+
+####################################
+# for use with 'shiny' application #
+library(sf)
+
+# convert from spatvector object to sf object
+seed_sf <- st_as_sf(seeds_pts)
+
+# Reproject to WGS84 lon/lat for using a base map in the application
+seed_sf <- st_transform(seed_sf, crs = 4326)
+####################################
