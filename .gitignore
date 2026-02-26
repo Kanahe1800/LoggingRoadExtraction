@@ -1,16 +1,5 @@
-.Rproj.user
-.Rhistory
 .RData
-.Ruserdata
-*.tif.RData
 .Rhistory
 .Rproj.user/
 .Ruserdata/
 *.Rproj
-*.tif.RData
-.Rhistory
-.Rproj.user/
-.Ruserdata/
-*.Rproj
-*.tif
-__Pycache__
