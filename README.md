@@ -22,7 +22,7 @@ Low (negative) values of `slope_dif` indicate road-like flatness.
 
 Roads are smooth. Surface roughness — estimated as the standard deviation of slope within a focal window — is low over road surfaces and high in forested or rocky terrain. To be robust across varying road widths and contexts, roughness is computed at three spatial scales (5×5, 11×11, 21×21 pixels) and averaged:
 
-$$\text{roughness\_ms} = \frac{\sigma_5 + \sigma_{11} + \sigma_{21}}{3}$$
+$$roughness_{ms} = \frac{\sigma_5 + \sigma_{11} + \sigma_{21}}{3}$$
 
 Roads consistently exhibit **low roughness at all scales**, making this a multi-scale discriminator that is less sensitive to noise at any single scale.
 
@@ -30,7 +30,7 @@ Roads consistently exhibit **low roughness at all scales**, making this a multi-
 
 Profile curvature measures how the slope is changing along the direction of maximum gradient. Roads intersect natural terrain at sharp transitions (road shoulders/ditches), creating strong **linear curvature discontinuities**. These are detected by applying a 5×5 Sobel edge detector to the profile curvature layer. The resulting edge magnitudes are smoothed with a 21×21 Gaussian kernel (σ=3) to reduce noise and widen the signal around road boundaries:
 
-$$\text{edges} = \mathcal{G}_{\sigma=3} \left( \| \nabla \text{profcurv} \| \right)$$
+$$edges = \mathcal{G}_{\sigma=3} \left( \| \nabla \, profcurv \| \right)$$
 
 High edge magnitude indicates sharp terrain breaks consistent with road margins.
 
@@ -47,7 +47,7 @@ This produces a continuous *score* per feature that reflects both **membership**
 
 The three normalized scores are averaged into a single seed strength raster:
 
-$$\text{seeds} = \frac{\text{slope\_score} + \text{rough\_score} + \text{edges\_score}}{3}$$
+$$seeds = \frac{slope_{score} + rough_{score} + edges_{score}}{3}$$
 
 Values near 1.0 indicate strong, convergent evidence from all three terrain signals that a pixel lies on or near a road surface. This continuous output is suitable for use as a cost surface or seed layer in subsequent least-cost path analysis.
 
