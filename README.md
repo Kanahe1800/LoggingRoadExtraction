@@ -14,7 +14,7 @@ A LiDAR-based road detection pipeline that generates a continuous **seed likelih
 #### 1. Slope Difference (`slope_dif`)
 Raw slope captures local gradient, but roads do not simply have low slope — they have **locally low slope relative to their surroundings**. A large uniform low-pass filter (51×51 kernel) estimates the regional slope trend. Subtracting this smoothed surface from the raw slope isolates pixels that are **anomalously flat** compared to their neighbourhood, which is a strong indicator of road cuts or fills.
 
-$$\text{slope\_dif} = \text{slope} - \text{slope\_smooth}$$
+$$slope_{dif} = slope - slope_{smooth}$$
 
 Low (negative) values of `slope_dif` indicate road-like flatness.
 
