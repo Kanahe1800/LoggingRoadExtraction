@@ -1,163 +1,172 @@
 library(terra)
 library(sf)
 library(dbscan)
+library(RANN)
 
-source("C:/Users/mimam/Dropbox/LoggingRoadExtraction/skeletonize.R")
+source("EnvLoader.R")
+source(skeletonize_path)
 
 to_utm_epsg <- function(sfobj_ll) {
-  ctd  <- st_coordinates(st_centroid(st_union(sfobj_ll)))
+  # 1. Get centroid coordinates
+  ctd  <- sf::st_coordinates(sf::st_centroid(sf::st_union(sfobj_ll)))
   lon  <- ctd[1]; lat <- ctd[2]
+  
+  # 2. Calculate UTM Zone (1-60)
   zone <- floor((lon + 180) / 6) + 1
-  if (lat >= 0) paste0("EPSG:", 32600 + zone) else paste0("EPSG:", 32700 + zone)
+  
+  # 3. Validate Zone (Must be 1-60)
+  if (zone < 1 || zone > 60) {
+    warning("Calculated UTM zone is invalid. Defaulting to WGS84 (EPSG:4326)")
+    return("EPSG:4326")
+  }
+  
+  # 4. Construct EPSG code
+  epsg <- if (lat >= 0) (32600 + zone) else (32700 + zone)
+  return(paste0("EPSG:", epsg))
 }
 
 seeds_to_points <- function(
     seeds,
     out_points,
-    prob_threshold      = 0.25,
-    do_opening          = FALSE,
-    opening_size        = 3,
-    min_skel_blob_px    = 1,
-    min_component_len_m = 1.0,
-    min_spacing_m       = 8.0
+    prob_threshold,
+    do_opening,
+    opening_size,
+    min_skel_blob_px,
+    min_component_len_m,
+    min_spacing_m,
+    snap_radius  # Search radius (in pixels) to find the true road center
 ){
   stopifnot(inherits(seeds, "SpatRaster"))
   
-  # Work in meters if input is lon/lat
+  # 1. Coordinate System Check
   if (terra::is.lonlat(seeds)) {
     cent_ll <- st_as_sfc(st_bbox(seeds), crs = 4326) |> st_centroid()
     utm_epsg <- to_utm_epsg(cent_ll)
-    message("Reprojecting seeds to ", utm_epsg, " for metric processing")
     seeds <- terra::project(seeds, utm_epsg, method = "bilinear")
   }
   
-  # Pixel size (diagonal) in meters, as in np.hypot
   pix_m <- sqrt(sum(terra::res(seeds)^2))
   
-  # --- Threshold to binary mask ---
+  # 2. Thresholding and Skeletonization
   m <- as.matrix(seeds)
-  finite_mat <- is.finite(m)
-  if (!any(finite_mat)) stop("No finite pixels in seeds")
+  mask_mat <- (m >= as.numeric(prob_threshold)) & is.finite(m)
   
-  thr <- as.numeric(prob_threshold)
-  mask_mat <- (m >= thr) & finite_mat
-  cat(sprintf("[A] threshold=%.3f → mask pixels: %d\n", thr, sum(mask_mat, na.rm = TRUE)))
-  
-  # Optional tiny opening (erode→dilate) using focal min/max
   if (do_opening) {
     w <- matrix(1, opening_size, opening_size)
-    r_mask <- rast(ext = ext(seeds), crs = crs(seeds), nrow = nrow(seeds), ncol = ncol(seeds))
-    values(r_mask) <- as.integer(mask_mat)
-    eroded <- terra::focal(r_mask, w = w, fun = min, na.policy = "omit")
-    opened <- terra::focal(eroded, w = w, fun = max, na.policy = "omit")
-    mask_mat <- as.matrix(opened) > 0.5
-    cat(sprintf("[A] after opening: %d pixels\n", sum(mask_mat, na.rm = TRUE)))
+    r_mask <- rast(seeds); values(r_mask) <- as.integer(mask_mat)
+    mask_mat <- as.matrix(terra::focal(terra::focal(r_mask, w, min), w, max)) > 0.5
   }
   
-  # --- Skeletonize (your sourced function must return logical matrix of same dim) ---
-  skel_mat <- thin_zhang_suen(mask_mat)
-  if (!is.matrix(skel_mat) || any(dim(skel_mat) != dim(mask_mat))) {
-    stop("skeletonize.R: thin_zhang_suen() must return a logical/numeric matrix of same dimensions as input.")
-  }
-  skel_mat <- skel_mat > 0
-  cat(sprintf("[B] skeleton pixels: %d\n", sum(skel_mat, na.rm = TRUE)))
+  skel_mat <- thin_zhang_suen(mask_mat) > 0
+  skel_r   <- rast(seeds); values(skel_r) <- NA_integer_; skel_r[skel_mat] <- 1L
   
-  # Build skeleton raster with background = NA (CRITICAL for patches())
-  skel_r <- rast(ext = ext(seeds), crs = crs(seeds), nrow = nrow(seeds), ncol = ncol(seeds))
-  values(skel_r) <- NA_integer_
-  skel_r[skel_mat] <- 1L
-  
-  # --- Remove tiny skeleton fragments (in pixels) ---
+  # 3. Component Filtering (Size and Length)
+  lab <- terra::patches(skel_r, directions = 8)
   if (min_skel_blob_px > 1) {
-    lab <- terra::patches(skel_r, directions = 8)  # labels (NA outside)
-    ft  <- as.data.frame(terra::freq(lab))         # <-- no useNA arg
-    if (nrow(ft) == 0) {
-      cat("[B] no labeled pixels; nothing to keep\n")
-      return(invisible(st_sf()))
-    }
-    keep_ids <- ft$value[ft$count >= min_skel_blob_px]
-    skel_keep <- lab %in% keep_ids
-  } else {
-    skel_keep <- !is.na(skel_r)
+    ft <- as.data.frame(terra::freq(lab))
+    skel_r <- terra::ifel(lab %in% ft$value[ft$count >= min_skel_blob_px], 1L, NA_integer_)
   }
-  cat(sprintf("[B] skeleton after small-object removal: %d px\n",
-              terra::global(skel_keep, "sum", na.rm = TRUE)[[1]]))
   
-  # --- Keep long components only (by length in meters) ---
-  lab_len <- terra::patches(terra::mask(skel_r, skel_keep, maskvalues = NA), directions = 8)
-  props   <- as.data.frame(terra::freq(lab_len))   # <-- no useNA arg
-  if (nrow(props) == 0) stop("No skeleton pixels survived. Lower threshold or relax filters.")
-  
+  lab_len <- terra::patches(skel_r, directions = 8)
+  props   <- as.data.frame(terra::freq(lab_len))
   props$length_m <- props$count * pix_m
-  keep_labels <- props$value[props$length_m >= min_component_len_m]
+  r_final <- terra::ifel(lab_len %in% props$value[props$length_m >= min_component_len_m], 1L, NA_integer_)
   
-  if (length(keep_labels) == 0) {
-    keep_labels <- head(props$value[order(-props$count)], 5)
-    message("[C] no component ≥ min length; keeping top 5 longest as fallback.")
+  # 4. FAST GLOBAL SNAPPING (Focal Method)
+  message(sprintf("Processing points with Global Focal Snapping..."))
+  
+  # A. Extract skeleton coordinates FIRST (before snapping)
+  xy_skel <- terra::as.data.frame(r_final, xy = TRUE, na.rm = TRUE)
+  
+  # B. Calculate local maxima for the entire raster
+  size <- (snap_radius * 2) + 1
+  focal_max <- terra::focal(seeds, w = size, fun = "max", na.rm = TRUE)
+  is_local_max <- (seeds == focal_max)
+  
+  # C. Mask maxima to skeleton vicinity to keep RAM usage low
+  search_dist <- (snap_radius + 1) * pix_m
+  skel_poly <- sf::st_as_sf(terra::as.polygons(r_final))
+  skel_buffer <- sf::st_buffer(skel_poly, dist = search_dist)
+  
+  local_max_cropped <- terra::mask(is_local_max, terra::vect(skel_buffer))
+  max_pts <- terra::as.data.frame(local_max_cropped, xy = TRUE, na.rm = TRUE)
+  max_pts <- max_pts[max_pts[[3]] == 1, 1:2] 
+  
+  # D. Snap: Find nearest high-probability peak for each skeleton point
+  if (nrow(max_pts) > 0) {
+    tree <- nn2(data = max_pts, query = xy_skel[,1:2], k = 1)
+    xy_snapped <- max_pts[tree$nn.idx, ]
+  } else {
+    xy_snapped <- xy_skel[,1:2] # Fallback if no peaks found
   }
   
-  # --- Convert logical mask to integer raster with background = NA ---
-  skel_final <- (lab_len %in% keep_labels)
-  r_final <- terra::ifel(skel_final, 1L, NA_integer_)
-  names(r_final) <- "v"
+  # 5. CONVERT TO SF AND THIN
+  message("Creating spatial features and thinning points...")
   
-  kept_px <- terra::global(r_final, "sum", na.rm = TRUE)[[1]]
-  cat(sprintf("[C] kept skeleton pixels (after length filter): %d\n", kept_px))
-  if (is.na(kept_px) || kept_px == 0)
-    stop("No skeleton pixels survived. Lower threshold or relax filters.")
-  
-  # --- Raster → points; attach score from seeds raster ---
-  xy <- terra::as.data.frame(r_final, xy = TRUE, na.rm = TRUE)
-  # xy has columns: x, y, v (v==1 for skeleton pixels)
-  
-  # sample scores from the original seeds raster at those x,y
-  scores <- as.numeric(terra::extract(seeds, xy[, c("x","y")], cells = FALSE)[, 1])
-  
-  # IMPORTANT: coords expects column NAMES, not the data
-  gdf <- sf::st_as_sf(data.frame(score = scores, x = xy$x, y = xy$y),
-                      coords = c("x","y"),
-                      crs = terra::crs(seeds))
-  cat(sprintf("[D] converted to %d skeleton points\n", nrow(gdf)))
-  
-  # --- Thin points to min_spacing_m (greedy, highest score first) ---
-  # choose UTM from geometry centroid
-  cent_ll <- sf::st_transform(sf::st_as_sfc(st_bbox(gdf), crs = sf::st_crs(gdf)),
-                              4326) |>
-    sf::st_centroid()
-  utm_epsg <- to_utm_epsg(cent_ll)
-  gdf_m <- sf::st_transform(gdf, utm_epsg)
-  
-  XY <- sf::st_coordinates(gdf_m)
-  order_idx <- order(-gdf_m$score)
-  alive <- rep(TRUE, nrow(gdf_m))
-  keep_idx <- integer(0)
-  
-  nbr <- dbscan::frNN(XY, eps = min_spacing_m)
-  for (i in order_idx) {
-    if (!alive[i]) next
-    keep_idx <- c(keep_idx, i)
-    nbi <- unlist(nbr$id[i])
-    if (length(nbi)) alive[nbi] <- FALSE
-    alive[i] <- TRUE
+  # Ensure we have snapped coordinates
+  if (!exists("xy_snapped") || nrow(xy_snapped) == 0) {
+    stop("Snapping failed: No valid road peaks found. Try lowering 'prob_threshold'.")
   }
   
-  gdf_thin <- gdf[keep_idx, ]
-  cat(sprintf("[E] thinned points: %d\n", nrow(gdf_thin)))
-  gdf_thin <- sf::st_transform(gdf_thin, 4326)
+  # A. Create the 'gdf' object FIRST
+  scores <- as.numeric(terra::extract(seeds, xy_snapped)[,1])
+  gdf <- sf::st_as_sf(data.frame(score = scores, x = xy_snapped[,1], y = xy_snapped[,2]),
+                      coords = c("x","y"), crs = terra::crs(seeds))
   
-  # --- Save ---
+  # B. Prepare for thinning (Project to UTM for accurate distance in meters)
+  # Use a fixed, correct EPSG for your region (Oak Bay, BC = 32610)
+  target_epsg <- 32610 
+  gdf_m <- sf::st_transform(gdf, target_epsg)
+  
+  # C. GREEDY THINNING (Grid-Based Optimization)
+  print("Final Greedy Thinning using Grid...")
+  
+  # 1. Map points to a grid based on min_spacing_m
+  # Using gdf_m (the projected version) ensures units are in meters
+  print("1")
+  coords <- sf::st_coordinates(gdf_m)
+  grid_x <- floor(coords[,1] / min_spacing_m)
+  grid_y <- floor(coords[,2] / min_spacing_m)
+  
+  # 2. Assign each point to a cell ID
+  print("2")
+  cell_id <- paste(grid_x, grid_y, sep = "_")
+  
+  # 3. Create a data frame to identify the best point per cell
+  print("3")
+  df_thin <- data.frame(
+    id = 1:nrow(gdf_m),
+    cell_id = cell_id,
+    score = gdf_m$score
+  )
+  
+  # 4. Pick the index of the point with the max score per cell
+  # We use aggregate to find the row index in gdf_m (and gdf)
+  print("4")
+  best_indices <- aggregate(id ~ cell_id, data = df_thin, FUN = function(x) {
+    x[which.max(df_thin$score[x])]
+  })$id
+  
+  # 5. Subset the original (unprojected) gdf using those indices
+  print("5")
+  gdf_thin <- gdf[best_indices, ]
+  
+  # 6. Final Write
+  print("6")
   sf::st_write(gdf_thin, out_points, driver = "GeoJSON", delete_dsn = TRUE, quiet = TRUE)
-  cat(sprintf("Saved %d points → %s\n", nrow(gdf_thin), out_points))
   
+  return(gdf_thin)
 }
 
 
-out_points <- "C:/Users/mimam/Dropbox/lider_data/output/seed_points_test_v2.geojson"
-
 pts <- seeds_to_points(
   seeds = seeds,
-  out_points = out_points,
-  prob_threshold = 0.4,
-  min_spacing_m = 10.0,           # Adjust this to control point density
-  min_component_len_m = 2.0
+  out_points_file,
+  prob_threshold      = prob_threshold,
+  do_opening          = do_opening,
+  opening_size        = opening_size,
+  min_skel_blob_px    = min_skel_blob_px,
+  min_component_len_m = min_component_len_m,
+  min_spacing_m       = min_spacing_m,
+  snap_radius = 4
 )
