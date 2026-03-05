@@ -4,12 +4,8 @@
 library(terra)
 library(whitebox)
 library(autothresholdr)
+source("EnvLoader.R")
 
-## set up directories ##
-dir.in <- "C:/Users/mimam/Dropbox/lider_data/input" # for input
-dir.out <- "C:/Users/mimam/Dropbox/lider_data/output" # for outputs
-dir.tmp <- "C:/Users/mimam/Dropbox/lider_data/tmp" # for temporary files
-file_name <- "pine_lake.tif"
 ## custom functions ##
 # activation function
 activation <- function(x, th, asc = TRUE) {
@@ -124,7 +120,7 @@ dem <-  terra::rast(file.path(dir.in, file_name))
 slope <- terrain(dem, "slope")
 
 # make a low pass filter window
-w <- matrix(1, 51, 51) # uniform weighting
+w <- matrix(1, slope_smooth_window, slope_smooth_window) # uniform weighting
 w <- w / sum(w)        # normalize
 
 # apply low pass filter to the slope layer
@@ -141,9 +137,9 @@ gc()
 
 ## multiscale roughness ##
 # run sd filter on slope layer at different window sizes (3, 7, 15 or 5, 11, 21)
-sd5  <- focal(slope, w = matrix(1,5,5), fun = sd, na.rm=TRUE)
-sd11  <- focal(slope, w = matrix(1,11,11), fun = sd, na.rm=TRUE)
-sd21 <- focal(slope, w = matrix(1,21,21), fun = sd, na.rm=TRUE)
+sd5  <- focal(slope, w = matrix(1,roughness_sd_small,roughness_sd_small), fun = sd, na.rm=TRUE)
+sd11  <- focal(slope, w = matrix(1,roughness_sd_med,roughness_sd_med), fun = sd, na.rm=TRUE)
+sd21 <- focal(slope, w = matrix(1,roughness_sd_large,roughness_sd_large), fun = sd, na.rm=TRUE)
 
 # combine scales: roads should have low roughness at multiple scales
 roughness_ms <- (sd5 + sd11 + sd21) / 3
@@ -166,11 +162,11 @@ wbt_profile_curvature(
 prof_curv <- rast(file.path(dir.out, "profcurv_cc.tif"))
 
 # apply sobel edge detection
-edges <- sobel_filter(prof_curv, size = 5, output = "magnitude")
+edges <- sobel_filter(prof_curv, size = sobel_size, output = "magnitude")
 edges <- ifel(is.na(edges), 0.01, edges) # remove some introduced NA's
 
 # build a gaussian filter kernel
-kernel <- gaussian_kernel(size = 21, sigma = 3)
+kernel <- gaussian_kernel(size = gaussian_size, sigma = gaussian_sigma)
 
 # apply gaussian filter
 edges <- focal(edges, w = kernel, fun = sum, na.policy = "omit", pad = TRUE)
@@ -217,6 +213,6 @@ seeds <- (edges_score + rough_score + slope_score) / 3
 plot(seeds, main = "Continuous seed strength (0–1)")
 
 writeRaster(seeds, 
-            filename = file.path(dir.out, "seeds_combined.tif"),
+            filename = seeds_file,
             overwrite = TRUE)
 
