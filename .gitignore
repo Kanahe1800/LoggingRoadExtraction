@@ -3,3 +3,4 @@
 .Rproj.user/
 .Ruserdata/
 *.Rproj
+local.env
