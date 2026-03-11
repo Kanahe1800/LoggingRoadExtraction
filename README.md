@@ -72,19 +72,6 @@ project/
 ```
 
 ---
-
-### Configuration for createSeeds.R
-
-Edit the top of `createSeeds.R` to set your paths and input file:
-
-```r
-dir.in   <- "path/to/input"
-dir.out  <- "path/to/output"
-dir.tmp  <- "path/to/tmp"
-file_name <- "your_dem.tif"
-```
-
----
 ### Output from createSeeds.R
 
 `seeds_combined.tif` — a single-band raster co-registered with the input DEM, with pixel values in [0, 1] representing road likelihood. Higher values indicate stronger convergent evidence of road presence across slope, roughness, and curvature edge features.
@@ -92,45 +79,59 @@ file_name <- "your_dem.tif"
 
 ## Stage 2 — Raster to Vector (`RasterToVector.R`)
 
-Converts the `seeds` probability raster into a **thinned set of georeferenced seed points** (GeoJSON) suitable for use as inputs to least-cost path analysis or manual digitizing. The core function is `seeds_to_points()`.
+Converts the `seeds` probability raster into a **thinned set of georeferenced seed points** (GeoJSON) that are snapped to true road-centre peaks. These points serve as start/end node candidates for subsequent least-cost path analysis. The core function is `seeds_to_points()`.
 
 ### Workflow
 ![RasterToVector workflow diagram](images/rasterToVector.png)
 
 ### Theory
 
-#### Thresholding & Binary Mask
+#### 1. Thresholding & Binary Mask
 
-The continuous seed surface is binarized at a user-defined `prob_threshold` (default 0.3). Pixels at or above this value are treated as candidate road pixels. An optional morphological **opening** (erosion followed by dilation) can be applied to remove isolated noise pixels before skeletonization.
+The continuous seed surface is binarized at a user-defined `prob_threshold`. Pixels at or above this value are treated as candidate road pixels. An optional morphological **opening** (erosion via `focal min` followed by dilation via `focal max`) can be applied to remove isolated noise pixels before skeletonization.
 
-#### Skeletonization (Zhang-Suen Thinning)
+#### 2. Skeletonization (Zhang-Suen Thinning)
 
-The binary road mask is reduced to a **1-pixel-wide skeleton** using the Zhang-Suen iterative thinning algorithm (sourced from `skeletonize.R`). This collapses road polygons to their centrelines, ensuring that downstream point sampling captures road position rather than road width.
+The binary road mask is reduced to a **1-pixel-wide skeleton** using the Zhang-Suen iterative thinning algorithm (sourced from `skeletonize.R`). This collapses road-width blobs to their centrelines, ensuring that downstream point sampling captures road position rather than road width.
 
-#### Connected Component Filtering
+#### 3. Connected Component Filtering
 
-The skeleton is labelled into 8-connected components. Two filters are applied sequentially:
+The skeleton is labelled into 8-connected components via `terra::patches()`. Two filters are applied sequentially:
 
-1. **Minimum blob size** (`min_skel_blob_px`): removes isolated skeleton pixels likely caused by noise.
-2. **Minimum component length** (`min_component_len_m`): removes short skeleton fragments unlikely to represent actual roads. Component length is estimated as pixel count × pixel diagonal (in metres).
+1. **Minimum blob size** (`min_skel_blob_px`): removes isolated skeleton pixels caused by noise.
+2. **Minimum component length** (`min_component_len_m`): removes short fragments unlikely to represent actual roads. Length is estimated as `pixel count × pixel diagonal (m)`.
 
-#### Score-Weighted Point Thinning
+#### 4. Global Focal Snapping
 
-Skeleton pixels are converted to point geometries and each point is assigned the corresponding seed score from the original raster. Points are then **greedily thinned** to a minimum spacing of `min_spacing_m` metres: points are processed in descending score order, and any neighbour within the spacing radius is suppressed. This produces a spatially distributed set of high-confidence seed points using a fixed-radius nearest-neighbour index (`dbscan::frNN`) for efficiency.
+Raw skeleton pixels sit on the thinned centreline of the *thresholded mask*, which may not coincide with the highest-probability pixel (the true road centre) in the original `seeds` raster. Snapping corrects this:
+
+1. A focal maximum filter is applied to the full `seeds` raster with a window of `(snap_radius × 2) + 1` pixels, identifying local intensity peaks.
+2. Local maxima are masked to a buffer around the skeleton (radius = `snap_radius + 1` pixels) to restrict the search space and keep RAM usage low.
+3. Each skeleton point is matched to its nearest local maximum using `RANN::nn2()`, shifting it onto the highest-confidence road-centre pixel within the search window.
+
+This produces `xy_snapped` — skeleton-derived points relocated to true road peaks — which are used as the candidate start/end nodes for path routing.
+
+#### 5. Grid-Based Greedy Thinning
+
+To produce a spatially uniform set of seed nodes, points are thinned using a **grid-cell approach**:
+
+1. All snapped points are projected to UTM (EPSG:32610) for metric coordinates.
+2. Each point is assigned to a grid cell of size `min_spacing_m × min_spacing_m` metres using `floor(x / min_spacing_m)`.
+3. Within each cell, only the point with the **highest seed score** is retained.
+
+This is equivalent to greedy thinning with a regular spacing guarantee, but runs in O(n) time without a nearest-neighbour search, making it efficient on large skeletons.
 
 #### CRS Handling
 
-If the input raster is in geographic coordinates (lon/lat), it is automatically reprojected to the appropriate **UTM zone** (derived from the raster centroid) before any metric operations. Output points are re-projected back to WGS84 (EPSG:4326) before saving.
+If the input raster is in geographic coordinates (lon/lat), it is automatically reprojected to the appropriate **UTM zone** (derived from the raster centroid) before any metric operations. Output points are written in their projected CRS.
 
 ### Dependencies
 
 | Package | Purpose |
 |---|---|
-| `terra` | Raster operations, coordinate extraction |
+| `terra` | Raster operations, focal filtering, coordinate extraction |
 | `sf` | Vector I/O, CRS transforms, GeoJSON output |
-| `dbscan` | Fixed-radius nearest-neighbour search for point thinning |
-
-`skeletonize.R` (local source) must be present and export `thin_zhang_suen()`.
+| `RANN` | Fast nearest-neighbour search (`nn2`) for snapping |
 
 ### Configuration
 
@@ -138,16 +139,17 @@ Key parameters in the `seeds_to_points()` call:
 
 | Parameter | Default | Description |
 |---|---|---|
-| `prob_threshold` | `0.25` | Minimum seed score to include a pixel |
-| `do_opening` | `FALSE` | Apply morphological opening before skeletonization |
-| `opening_size` | `3` | Kernel size for opening (pixels) |
-| `min_skel_blob_px` | `1` | Minimum skeleton fragment size (pixels) |
-| `min_component_len_m` | `1.0` | Minimum skeleton component length (metres) |
-| `min_spacing_m` | `8.0` | Minimum spacing between output points (metres) |
+| `prob_threshold` | — | Minimum seed score to include a pixel |
+| `do_opening` | — | Apply morphological opening before skeletonization |
+| `opening_size` | — | Kernel size for opening (pixels) |
+| `min_skel_blob_px` | — | Minimum skeleton fragment size (pixels) |
+| `min_component_len_m` | — | Minimum skeleton component length (metres) |
+| `min_spacing_m` | — | Grid cell size for thinning (metres) |
+| `snap_radius` | `4` | Search radius (pixels) for road-centre snapping |
 
 ### Output
 
-`seed_points.geojson` — a point layer in WGS84 with a `score` attribute (the original seed probability at each point location). Point density is controlled by `min_spacing_m`.
+`seed_points.geojson` — a point layer with a `score` attribute (the seed probability at each snapped location). Points represent candidate road start/end nodes, spatially distributed at approximately `min_spacing_m` metre intervals and snapped to the highest-probability road-centre pixels.
 
 ## Notes
 
