@@ -96,22 +96,11 @@ server <- function(input, output, session) {
   map_view            <- reactiveVal(list())
   
   # ── Static map (rendered once) ──────────────────────────────────────────────
+  # ── Static map (rendered once) ──────────────────────────────────────────────
   output$map <- renderLeaflet({
     leaflet() %>%
-      addProviderTiles("Esri.WorldImagery",
-                       group   = "Satellite",
-                       options = providerTileOptions(opacity = 1)) %>%
-      addProviderTiles("CartoDB.Positron",
-                       group   = "Street Map",
-                       options = providerTileOptions(opacity = 1)) %>%
-      # Raster starts visible, toggled by checkbox
-      addRasterImage(
-        cost_raster,
-        colors  = pal,
-        opacity = 0.85,
-        group   = "Cost Layer",
-        layerId = "seed_raster"       # ← key: named layerId for removeImage()
-      ) %>%
+      addProviderTiles("Esri.WorldImagery", group = "Satellite") %>%
+      addProviderTiles("CartoDB.Positron",  group = "Street Map") %>%
       addLegend(
         pal      = pal,
         values   = c(cost_min, cost_max),
@@ -131,12 +120,29 @@ server <- function(input, output, session) {
         editOptions         = editToolbarOptions()
       ) %>%
       addLayersControl(
-        baseGroups    = c("Satellite", "Street Map"),  # raster removed from here
+        baseGroups    = c("Satellite", "Street Map"),
         overlayGroups = c("points", "aoi_draw"),
         options       = layersControlOptions(collapsed = TRUE)
       )
   })
   
+  # ── Load raster once map is ready ───────────────────────────────────────────
+  # input$map_zoom becomes available only after the map renders
+  observe({
+    req(input$map_zoom)  # this fires only after map is fully initialized
+    if (isolate(input$show_raster)) {
+      leafletProxy("map") %>%
+        addRasterImage(
+          cost_raster,
+          colors  = pal,
+          opacity = 0.85,
+          group   = "Cost Layer",
+          layerId = "seed_raster"
+        )
+    }
+  })
+  
+  # ── Raster toggle (checkbox changes only) ───────────────────────────────────
   observeEvent(input$show_raster, {
     if (input$show_raster) {
       leafletProxy("map") %>%
@@ -149,10 +155,9 @@ server <- function(input, output, session) {
         )
     } else {
       leafletProxy("map") %>%
-        removeImage(layerId = "seed_raster")
+        clearGroup("Cost Layer")
     }
-  })
-  
+  }, ignoreInit = TRUE)
   # ── Load uploaded GeoJSON ───────────────────────────────────────────────────
   observeEvent(input$load_upload, {
     req(input$upload_geojson)
