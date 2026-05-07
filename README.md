@@ -1,159 +1,239 @@
 # LoggingRoadExtraction
 
+A LiDAR-based pipeline for extracting logging road centrelines from Digital Elevation Models (DEMs). The pipeline runs in three stages: seed generation, raster-to-vector conversion, and least-cost path road extraction, with an optional interactive point editing step between stages 2 and 3.
 
-## Stage 1 - Seed Generation (`createSeeds.R`)
+> For the theoretical background behind each stage, see [THEORY.md](THEORY.md).
 
-A LiDAR-based road detection pipeline that generates a continuous **seed likelihood map** (0–1) from a Digital Elevation Model (DEM). The seed layer identifies candidate road pixels by combining terrain-derived evidence across three parallel feature streams, each independently normalized and fused into a single probability surface.
+---
 
-### Workflow
-![createSeeds workflow diagram](images/createSeeds.png)
+## Requirements
 
-
-###  Theory
-
-#### 1. Slope Difference (`slope_dif`)
-Raw slope captures local gradient, but roads do not simply have low slope — they have **locally low slope relative to their surroundings**. A large uniform low-pass filter (51×51 kernel) estimates the regional slope trend. Subtracting this smoothed surface from the raw slope isolates pixels that are **anomalously flat** compared to their neighbourhood, which is a strong indicator of road cuts or fills.
-
-$$slope_{dif} = slope - slope_{smooth}$$
-
-Low (negative) values of `slope_dif` indicate road-like flatness.
-
-#### 2. Multiscale Roughness (`roughness_ms`)
-
-Roads are smooth. Surface roughness — estimated as the standard deviation of slope within a focal window — is low over road surfaces and high in forested or rocky terrain. To be robust across varying road widths and contexts, roughness is computed at three spatial scales (5×5, 11×11, 21×21 pixels) and averaged:
-
-$$roughness_{ms} = \frac{\sigma_5 + \sigma_{11} + \sigma_{21}}{3}$$
-
-Roads consistently exhibit **low roughness at all scales**, making this a multi-scale discriminator that is less sensitive to noise at any single scale.
-
-#### 3. Profile Curvature Edges (`edges`)
-
-Profile curvature measures how the slope is changing along the direction of maximum gradient. Roads intersect natural terrain at sharp transitions (road shoulders/ditches), creating strong **linear curvature discontinuities**. These are detected by applying a 5×5 Sobel edge detector to the profile curvature layer. The resulting edge magnitudes are smoothed with a 21×21 Gaussian kernel (σ=3) to reduce noise and widen the signal around road boundaries:
-
-$$edges = \mathcal{G}_{\sigma=3} \left( \| \nabla \, profcurv \| \right)$$
-
-High edge magnitude indicates sharp terrain breaks consistent with road margins.
-
-#### Otsu Thresholding & Score Normalization
-
-Each of the three feature layers is automatically thresholded using **Otsu's method**, which finds the optimal binary split by minimizing intra-class variance. Rather than using the binary result directly, the threshold is used as a **reference point** for soft normalization:
-
-- Values above (or below, for slope) the Otsu threshold are treated as road-positive evidence.
-- The margin from the threshold is scaled to [0, 1] by dividing by the maximum observed margin.
-
-This produces a continuous *score* per feature that reflects both **membership** (above/below threshold) and **confidence** (how far above/below).
-
-#### Score Fusion
-
-The three normalized scores are averaged into a single seed strength raster:
-
-$$seeds = \frac{slope_{score} + rough_{score} + edges_{score}}{3}$$
-
-Values near 1.0 indicate strong, convergent evidence from all three terrain signals that a pixel lies on or near a road surface. This continuous output is suitable for use as a cost surface or seed layer in subsequent least-cost path analysis.
-
-### Dependencies
 | Package | Purpose |
 |---|---|
 | `terra` | Raster I/O, focal filtering, terrain analysis |
 | `whitebox` | Profile curvature via WhiteboxTools |
 | `autothresholdr` | Otsu automatic thresholding |
+| `sf` | Vector I/O, CRS transforms, GeoJSON output |
+| `RANN` | Fast nearest-neighbour search for point snapping |
+| `gdistance` | Least-cost path transition matrix |
+| `raster` | Required by `gdistance` |
+| `shiny` + `leaflet` | Interactive point editing app |
+| `leaflet.extras` | Draw toolbar for AOI selection |
+| `leafem` | Raster display in Leaflet |
+
+Install all at once:
+```r
+install.packages(c("terra", "whitebox", "autothresholdr", "sf", "RANN",
+                   "gdistance", "raster", "shiny", "leaflet",
+                   "leaflet.extras", "leafem"))
+```
 
 ---
-### Directory Structure
+
+## Setup
+
+### 1. Configure your environment
+
+Copy `local.env.example` to `local.env` and fill in your local paths:
+
+```ini
+DIR_IN=path/to/your/input
+DIR_OUT=path/to/your/output
+DIR_TMP=path/to/your/tmp
+SKELETONIZE_PATH=path/to/skeletonize.R
+```
+
+> `local.env` is machine-specific and should **never be committed to git** — it is already listed in `.gitignore`.
+> Algorithm parameters live in `settings.env` and are safe to commit.
+
+### 2. Place your input DEM
 
 ```
-project/
+input/
+└── your_dem.tif
+```
+
+Update `FILE_NAME` in `settings.env` to match your filename.
+
+### 3. Load environment at the top of each script
+
+Every script sources `EnvLoader.R` which reads both `local.env` and `settings.env` and assigns all variables:
+
+```r
+source("EnvLoader.R")
+```
+
+---
+
+## Directory Structure
+
+```
+LoggingRoadExtraction/
 ├── input/
-│   └── your_LiDAR_data.tif          # Input LiDAR DEM
+│   └── your_dem.tif                  # Input LiDAR DEM
 ├── output/
-│   ├── profcurv_cc.tif        # Intermediate: profile curvature
-│   └── seeds_combined.tif     # Final output: seed likelihood map
-└── tmp/                       # Temporary working files
+│   ├── profcurv_cc.tif               # Intermediate: profile curvature
+│   ├── seeds_combined.tif            # Stage 1 output: seed likelihood map
+│   └── seed_points.geojson           # Stage 2 output: candidate road nodes
+├── images/
+│   ├── createSeeds.png               # Stage 1 workflow diagram
+│   ├── rasterToVector.png            # Stage 2 workflow diagram
+│   ├── map_sample_screen.png         # App map view screenshot
+│   └── menu_sample_screen.png        # App menu screenshot
+├── tmp/                              # Temporary working files
+├── createSeeds_v2.R                  # Stage 1
+├── RasterToVector.R                  # Stage 2
+├── PointEditingApp_v2.R              # Stage 2b — interactive point editor
+├── RoadExtraction.R                  # Stage 3
+├── skeletonize.R                     # Zhang-Suen thinning (sourced internally)
+├── EnvLoader.R                       # Loads local.env + settings.env
+├── local.env                         # Your local paths  ← do not commit
+├── local.env.example                 # Template for local.env
+├── settings.env                      # Algorithm parameters
+├── README.md
+└── THEORY.md
 ```
 
 ---
-### Output from createSeeds.R
 
-`seeds_combined.tif` — a single-band raster co-registered with the input DEM, with pixel values in [0, 1] representing road likelihood. Higher values indicate stronger convergent evidence of road presence across slope, roughness, and curvature edge features.
+## Stage 1 — Seed Generation (`createSeeds_v2.R`)
 
-
-## Stage 2 — Raster to Vector (`RasterToVector.R`)
-
-Converts the `seeds` probability raster into a **thinned set of georeferenced seed points** (GeoJSON) that are snapped to true road-centre peaks. These points serve as start/end node candidates for subsequent least-cost path analysis. The core function is `seeds_to_points()`.
+Generates a continuous seed likelihood map (0–1) from the input DEM by combining three terrain-derived feature streams: slope difference, multiscale roughness, and profile curvature edges. Each stream is independently normalized using Otsu thresholding and averaged into a single road probability surface.
 
 ### Workflow
-![RasterToVector workflow diagram](images/rasterToVector.png)
 
-### Theory
+![createSeeds workflow diagram](images/createSeeds.png)
 
-#### 1. Thresholding & Binary Mask
+### Run
 
-The continuous seed surface is binarized at a user-defined `prob_threshold`. Pixels at or above this value are treated as candidate road pixels. An optional morphological **opening** (erosion via `focal min` followed by dilation via `focal max`) can be applied to remove isolated noise pixels before skeletonization.
+```r
+source("createSeeds_v2.R")
+```
 
-#### 2. Skeletonization (Zhang-Suen Thinning)
+**Output:** `output/seeds_combined.tif` — pixel values in [0, 1] representing road likelihood.
 
-The binary road mask is reduced to a **1-pixel-wide skeleton** using the Zhang-Suen iterative thinning algorithm (sourced from `skeletonize.R`). This collapses road-width blobs to their centrelines, ensuring that downstream point sampling captures road position rather than road width.
-
-#### 3. Connected Component Filtering
-
-The skeleton is labelled into 8-connected components via `terra::patches()`. Two filters are applied sequentially:
-
-1. **Minimum blob size** (`min_skel_blob_px`): removes isolated skeleton pixels caused by noise.
-2. **Minimum component length** (`min_component_len_m`): removes short fragments unlikely to represent actual roads. Length is estimated as `pixel count × pixel diagonal (m)`.
-
-#### 4. Global Focal Snapping
-
-Raw skeleton pixels sit on the thinned centreline of the *thresholded mask*, which may not coincide with the highest-probability pixel (the true road centre) in the original `seeds` raster. Snapping corrects this:
-
-1. A focal maximum filter is applied to the full `seeds` raster with a window of `(snap_radius × 2) + 1` pixels, identifying local intensity peaks.
-2. Local maxima are masked to a buffer around the skeleton (radius = `snap_radius + 1` pixels) to restrict the search space and keep RAM usage low.
-3. Each skeleton point is matched to its nearest local maximum using `RANN::nn2()`, shifting it onto the highest-confidence road-centre pixel within the search window.
-
-This produces `xy_snapped` — skeleton-derived points relocated to true road peaks — which are used as the candidate start/end nodes for path routing.
-
-#### 5. Grid-Based Greedy Thinning
-
-To produce a spatially uniform set of seed nodes, points are thinned using a **grid-cell approach**:
-
-1. All snapped points are projected to UTM (EPSG:32610) for metric coordinates.
-2. Each point is assigned to a grid cell of size `min_spacing_m × min_spacing_m` metres using `floor(x / min_spacing_m)`.
-3. Within each cell, only the point with the **highest seed score** is retained.
-
-This is equivalent to greedy thinning with a regular spacing guarantee, but runs in O(n) time without a nearest-neighbour search, making it efficient on large skeletons.
-
-#### CRS Handling
-
-If the input raster is in geographic coordinates (lon/lat), it is automatically reprojected to the appropriate **UTM zone** (derived from the raster centroid) before any metric operations. Output points are written in their projected CRS.
-
-### Dependencies
-
-| Package | Purpose |
-|---|---|
-| `terra` | Raster operations, focal filtering, coordinate extraction |
-| `sf` | Vector I/O, CRS transforms, GeoJSON output |
-| `RANN` | Fast nearest-neighbour search (`nn2`) for snapping |
-
-### Configuration
-
-Key parameters in the `seeds_to_points()` call:
+### Key parameters in `settings.env`
 
 | Parameter | Default | Description |
 |---|---|---|
-| `prob_threshold` | — | Minimum seed score to include a pixel |
-| `do_opening` | — | Apply morphological opening before skeletonization |
-| `opening_size` | — | Kernel size for opening (pixels) |
-| `min_skel_blob_px` | — | Minimum skeleton fragment size (pixels) |
-| `min_component_len_m` | — | Minimum skeleton component length (metres) |
-| `min_spacing_m` | — | Grid cell size for thinning (metres) |
-| `snap_radius` | `4` | Search radius (pixels) for road-centre snapping |
+| `FILE_NAME` | — | Input DEM filename |
+| `SLOPE_SMOOTH_WINDOW` | `51` | Low-pass filter window for slope smoothing |
+| `ROUGHNESS_SD_SMALL` | `5` | Small roughness window size (pixels) |
+| `ROUGHNESS_SD_MED` | `11` | Medium roughness window size (pixels) |
+| `ROUGHNESS_SD_LARGE` | `21` | Large roughness window size (pixels) |
+| `SOBEL_SIZE` | `5` | Sobel edge detection kernel size |
+| `GAUSSIAN_SIZE` | `21` | Gaussian smoothing kernel size |
+| `GAUSSIAN_SIGMA` | `3` | Gaussian smoothing sigma |
 
-### Output
+---
 
-`seed_points.geojson` — a point layer with a `score` attribute (the seed probability at each snapped location). Points represent candidate road start/end nodes, spatially distributed at approximately `min_spacing_m` metre intervals and snapped to the highest-probability road-centre pixels.
+## Stage 2 — Raster to Vector (`RasterToVector.R`)
+
+> Must be run in the **same R session** as Stage 1. Uses the `seeds` object held in memory.
+
+Converts the seed raster to a thinned, snapped set of georeferenced candidate road nodes using skeletonization, connected component filtering, focal snapping to road-centre peaks, and grid-based point thinning.
+
+### Workflow
+
+![RasterToVector workflow diagram](images/rasterToVector.png)
+
+### Run
+
+```r
+source("RasterToVector.R")
+```
+
+**Output:** `output/seed_points.geojson` — point layer with a `score` attribute representing seed probability at each snapped road-centre location.
+
+### Key parameters in `settings.env`
+
+| Parameter | Default | Description |
+|---|---|---|
+| `PROB_THRESHOLD` | `0.2` | Minimum seed score to include a pixel |
+| `DO_OPENING` | `FALSE` | Apply morphological opening before skeletonization |
+| `OPENING_SIZE` | `3` | Kernel size for opening (pixels) |
+| `MIN_SKEL_BLOB_PX` | `1` | Minimum skeleton fragment size (pixels) |
+| `MIN_COMPONENT_LEN_M` | `10.0` | Minimum skeleton component length (metres) |
+| `MIN_SPACING_M` | `200.0` | Grid cell size for point thinning (metres) |
+
+---
+
+## Stage 2b — Interactive Point Editing (`PointEditingApp_v2.R`) *(optional)*
+
+A Shiny web application for manually reviewing and editing the candidate seed points on an interactive map before running the road extraction. This quality-control step allows the operator to correct errors from automated seed generation — removing false positives and adding missed road segments.
+
+### Run
+
+```r
+shiny::runApp("PointEditingApp_v2.R")
+```
+
+### Map view
+
+The map displays seed points as red circle markers over a satellite or street map basemap. The seed raster can be toggled on/off using the checkbox in the control panel.
+
+![Map view of point editing app](images/map_sample_screen.png)
+
+### Control panel
+
+Upload your GeoJSON point file, switch between Add/Delete modes, draw an AOI polygon to bulk-delete points, reset to the original upload, and download the edited result.
+
+![Control panel of point editing app](images/menu_sample_screen.png)
+
+### Workflow
+
+1. Upload the `seed_points.geojson` output from Stage 2 using the file browser.
+2. Click **Load uploaded file** to display points on the map.
+3. Use **Add points** mode to click anywhere on the map to place new points.
+4. Use **Delete points** mode to click individual markers to remove them.
+5. Draw a polygon or rectangle using the toolbar (left side of map) to define an AOI, then click **Delete points in AOI** to bulk-remove all enclosed points.
+6. Click **Download GeoJSON** to save the edited point set for use in Stage 3.
+
+### Controls reference
+
+| Control | Description |
+|---|---|
+| Show seed raster | Toggle the seed likelihood raster overlay on/off |
+| Upload GeoJSON | Load a `.geojson` or `.json` point file |
+| Load uploaded file | Render uploaded points on the map |
+| Add points | Click mode: add a new point at each map click |
+| Delete points | Click mode: remove a point by clicking its marker |
+| Delete points in AOI | Remove all points within the drawn polygon/rectangle |
+| Reset to uploaded | Restore points to the last uploaded file |
+| Download GeoJSON | Export current points as a `.geojson` file |
+
+---
+
+## Stage 3 — Road Extraction (`RoadExtraction.R`)
+
+Connects the edited seed points via least-cost paths to reconstruct road centrelines. Builds a conductance surface from the inverted seed raster, computes a transition matrix, and greedily chains points into road segments using Dijkstra's algorithm.
+
+### Run
+
+```r
+source("RoadExtraction.R")
+```
+
+**Output:** `output/final_road_line.geojson` — line layer with a `line_id` attribute grouping connected road chains.
+
+### Key parameters in `settings.env`
+
+| Parameter | Default | Description |
+|---|---|---|
+| `EDITED_FILE` | — | Input edited points filename |
+| `FINAL_ROAD_LINE` | — | Output road lines filename |
+| `COST_BARRIER_VALUE` | `500` | Penalty assigned to high-cost barrier cells |
+| `TR_DIRECTIONS` | `16` | Transition matrix directions (8 or 16) |
+| `MAX_DISTANCE_THRESHOLD` | `1.5` | Search radius multiplier (× `MIN_SPACING_M`) |
+| `MEAN_COST_THRESHOLD` | `100` | Maximum mean path cost to accept a connection |
+| `MIN_SEGMENTS_PER_LINE` | `1` | Minimum segments to keep a road chain |
+
+---
 
 ## Notes
 
-- `createSeeds.R` and `RasterToVector.R` **must be run in the same R session**. `RasterToVector.R` uses the `seeds` `SpatRaster` object held in memory — it is not automatically re-loaded from disk.
-- All intermediate rasters are removed via `rm()` + `gc()` in `createSeeds.R` to manage RAM on large DEMs.
-- The Gaussian smoothing step uses `pad = TRUE` to avoid border artefacts; a subsequent `ifel` mask removes the zero-padded rim.
-- Otsu thresholding operates on an 8-bit rescaled histogram (0–255) for algorithm consistency, then back-transforms to real-value units.
+- `createSeeds_v2.R` and `RasterToVector.R` **must be run in the same R session** — `RasterToVector.R` uses the `seeds` `SpatRaster` object held in memory and does not reload it from disk automatically.
+- Add `local.env` to `.gitignore` to avoid committing machine-specific paths. The provided `.gitignore` already includes this.
+- `skeletonize.R` must be present in the project root — it is sourced automatically by `RasterToVector.R` via the `SKELETONIZE_PATH` variable in `local.env`.
+- On large DEMs, Stage 1 can be memory-intensive. Intermediate objects are cleared with `rm()` + `gc()` after each processing step.
+- If the Shiny app raster overlay does not appear on startup, ensure `session$onFlushed` has fired before `leafletProxy` is called — this is handled automatically in `PointEditingApp_v2.R`.
